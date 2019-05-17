@@ -3,6 +3,7 @@
 #include <TFile.h>
 #include <TGraph.h>
 #include <TH1D.h>
+#include <TLatex.h>
 #include <TLegend.h>
 #include <TMath.h>
 #include <TRandom3.h>
@@ -10,17 +11,22 @@
 
 #include <vector>
 #include <cmath>
+#include <TMath.h>
 
+namespace {
 constexpr double kITSreadoutRate{0.2e6};
-constexpr double kMinSeparation{.1};
+constexpr double kNsigmaSeparation{5};
 constexpr double kBunchCrossingRate{2.e7};
 constexpr double kMu{0.05};
 constexpr long kNumberOfROframes{4000000};
 constexpr int kTrigger{150};
 constexpr int kFitRejectionLimit{0};
+constexpr double kTrackletVertexResolution{0.01}; //100um
+const double kRMScut = kTrackletVertexResolution * (1. + 5. / std::sqrt(kTrigger));
 
 struct vertex {
   std::vector<int> ids;
+  std::vector<double> tracklets;
   double res;
   double z;
   int n;
@@ -28,6 +34,7 @@ struct vertex {
   bool merged;
   bool inBunchPU;
 };
+}
 
 void PileUpToy(const double itsRate, const int fitRejection) {
   gRandom->SetSeed(123456);
@@ -48,6 +55,8 @@ void PileUpToy(const double itsRate, const int fitRejection) {
   TH1D* hSelectedFakeAll = new TH1D("hSelectedFakeAll","Fake triggers (all vertices);Generated multiplicity;Events",300,0.5,300.5);
   TH1D* hSelectedFakeOOB = new TH1D("hSelectedFakeOOB","Fake triggers (OOB);Generated multiplicity;Events",300,0.5,300.5);
   TH1D* hSelectedHalf = new TH1D("hSelectedHalf","Fake triggers;Generated multiplicity;Events",300,0.5,300.5);
+  TH1D* hRMSsingle = new TH1D("hRMSsingle","Single vertex;RMS (#mum);Counts",600,kTrackletVertexResolution * 7000, 100000 * kTrackletVertexResolution);
+  TH1D* hRMSpileup = new TH1D("hRMSpileup","Pile-up;RMS (#mum);RMS (#mum);Counts",600,kTrackletVertexResolution * 7000, 100000 * kTrackletVertexResolution);
   hMult->SetLineColor(kBlack);
   hSelectedMult->SetLineColor(kBlack);
   hSelectedFakeOOB->SetLineColor(kRed);
@@ -65,6 +74,12 @@ void PileUpToy(const double itsRate, const int fitRejection) {
   hSelectedGood->SetLineColor(kGreen+3);
   hSelectedGood->SetFillColor(kGreen+3);
   hSelectedGood->SetFillStyle(3354);
+  hRMSsingle->SetLineColor(kGreen+3);
+  hRMSsingle->SetFillColor(kGreen+3);
+  hRMSsingle->SetFillStyle(3354);
+  hRMSpileup->SetLineColor(kRed);
+  hRMSpileup->SetFillColor(kRed);
+  hRMSpileup->SetFillStyle(3345);
   TH1D* hDeltaZ = new TH1D("hDeltaZ",";#Deltaz (cm);Events",400,0,20);
   TH1D* hSigmaZ = new TH1D("hSigmaZ",";#sigma_{z} (cm);Events",400,0,0.5);
   TH1D* hSigmaZall = new TH1D("hSigmaZall",";#sigma_{z} (cm);Events",400,0,0.5);
@@ -77,6 +92,7 @@ void PileUpToy(const double itsRate, const int fitRejection) {
   int triggeredROframe{0};
   int physicsTriggeredROframe{0};
   int fitSelected{0};
+  int spuriousSelections{0};
   for (int iROframe{0}; iROframe < kNumberOfROframes; ++iROframe) {
     genVertices.clear();
     recVertices.clear();
@@ -89,9 +105,12 @@ void PileUpToy(const double itsRate, const int fitRejection) {
         int mult = int(multHist->GetRandom());
         if (!mult) mult = 1;
         vertex vtx;
+        vtx.z = gRandom->Gaus(0,5); /// initialise the position
+        for (int iTrkl{0}; iTrkl < mult; ++iTrkl)
+          vtx.tracklets.push_back(gRandom->Gaus(vtx.z, kTrackletVertexResolution));
+        vtx.z = TMath::Mean(vtx.tracklets.begin(), vtx.tracklets.end()); /// compute the actual average of the tracklet z intercepts
         vtx.ids.push_back(genVertices.size());
-        vtx.res = pvResolution->Eval(mult);
-        vtx.z = gRandom->Gaus(0,5);
+        vtx.res = TMath::RMS(vtx.tracklets.begin(), vtx.tracklets.end());
         vtx.n = mult;
         vtx.merged = false;
         vtx.bc = iBC;
@@ -130,15 +149,16 @@ void PileUpToy(const double itsRate, const int fitRejection) {
           double delta{std::abs(recVertices[iVert].z - recVertices[jVert].z)};
           if (first) {
             hDeltaZ->Fill(delta);
-            hSigmaZ->Fill(10 * sigma);
+            hSigmaZ->Fill(kNsigmaSeparation * sigma);
           }
-          hSigmaZall->Fill(10 * sigma);
-          if (delta < kMinSeparation) {
+          hSigmaZall->Fill(kNsigmaSeparation * sigma);
+          if (delta < sigma * kNsigmaSeparation) {
               merging = true;
               recVertices[iVert].merged = true;
-              recVertices[iVert].z = (recVertices[iVert].z * recVertices[iVert].n + recVertices[jVert].z * recVertices[jVert].n) / (recVertices[iVert].n + recVertices[jVert].n);
-              recVertices[iVert].n = recVertices[iVert].n + recVertices[jVert].n;
-              recVertices[iVert].res = pvResolution->Eval(recVertices[iVert].n);
+              recVertices[iVert].tracklets.insert(recVertices[iVert].tracklets.begin(), recVertices[jVert].tracklets.begin(), recVertices[jVert].tracklets.end());
+              recVertices[iVert].res = TMath::RMS(recVertices[iVert].tracklets.begin(), recVertices[iVert].tracklets.end());
+              recVertices[iVert].z = TMath::Mean(recVertices[iVert].tracklets.begin(), recVertices[iVert].tracklets.end());
+              recVertices[iVert].n = recVertices[iVert].tracklets.size();
               recVertices[iVert].inBunchPU = (recVertices[iVert].bc == recVertices[jVert].bc);
               recVertices[iVert].ids.insert(recVertices[iVert].ids.end(), recVertices[jVert].ids.begin(), recVertices[jVert].ids.end());
               recVertices.erase(recVertices.begin()+jVert);
@@ -150,8 +170,9 @@ void PileUpToy(const double itsRate, const int fitRejection) {
     } while (merging);
 
     bool triggered{false};
+    bool badTrigger{false};
     for (auto& vert : recVertices) {
-      if (vert.n > kTrigger) {
+      if (vert.n > kTrigger && vert.res < kRMScut) {
         triggered = true;
         if (vert.merged) {
           bool half{false};
@@ -164,6 +185,7 @@ void PileUpToy(const double itsRate, const int fitRejection) {
               max = genVertices[id].n;
             sum += genVertices[id].n;
           }
+          hRMSpileup->Fill(vert.res * 1.e4);
           if (vert.ids.size() == 2)
             hSelectedFake->Fill(max);
           else
@@ -175,18 +197,35 @@ void PileUpToy(const double itsRate, const int fitRejection) {
             if (half)
               hSelectedHalf->Fill(genVertices[id].n);
           }
-        } else
+          if (!half)
+            badTrigger = true;
+        } else {
+          hRMSsingle->Fill(vert.res * 1.e4);
           hSelectedGood->Fill(vert.n);
+          badTrigger = false;
+        }
       }
     }
     if (triggered)
       triggeredROframe++;
+    if (badTrigger)
+      spuriousSelections++;
   }
 
+  double triggerEfficiency = (triggeredROframe - spuriousSelections) / double(physicsTriggeredROframe);
+  double triggerContamination = (spuriousSelections) / double(triggeredROframe);
   double fitRate = fitSelected / double(kNumberOfROframes) * itsRate;
-  std::string fitString = fitRejection > 0 ? Form("FIT selects N_{ch} > %i (%.1f kHz)",fitRejection, fitRate * 1.e-3) : "No FIT rejection";
   double triggerRate = triggeredROframe / double(kNumberOfROframes) * itsRate;
   double physicsRate = physicsTriggeredROframe / double(kNumberOfROframes) * itsRate;
+
+  TLatex tex;
+  tex.SetTextFont(42);
+  tex.SetTextSize(0.04);
+  tex.SetTextSize(0.04);
+  tex.SetTextAlign(33);
+  std::string fitString = fitRejection > 0 ? Form("FIT selects N_{ch} > %i (%.1f kHz)",fitRejection, fitRate * 1.e-3) : "No FIT rejection";
+  std::string headerText = Form("ITS RO rate: %.0f kHz, %s",itsRate * 1.e-3,fitString.data());
+  std::string legendText = Form("#splitline{Trigger/Process rates: %.0f/%.0f Hz}{Trigger efficiency/purity: %.1f%%/%.1f%%}",triggerRate, physicsRate,triggerEfficiency * 100, (1 - triggerContamination)*100);
 
   TFile output("output.root","recreate");
   TCanvas finalCv("finalCv");
@@ -196,11 +235,22 @@ void PileUpToy(const double itsRate, const int fitRejection) {
   hSelectedGood->Draw("same");
   hSelectedFake->Draw("same");
   hSelectedFake3->Draw("same");
-  TLegend* leg = finalCv.BuildLegend(0.5,0.5,0.9,0.82,Form("#splitline{#splitline{ITS RO rate: %1.1f MHz}{%s}}{Trigger/Process rates: %.0f/%.0f Hz}",itsRate * 1.e-6,fitString.data(),triggerRate,physicsRate));
+  TLegend* leg = finalCv.BuildLegend(0.5,0.5,0.9,0.82,legendText.data());
   leg->SetMargin(0.15);
   leg->SetFillStyle(0);
+  tex.DrawLatexNDC(0.95,0.95,headerText.data());
   finalCv.SaveAs(Form("trigger_%.0f_%i.pdf",itsRate*1.e-3,fitRejection));
   finalCv.Write();
+  TCanvas rmsCv("rmsCv");
+  rmsCv.SetLogy();
+  if (hRMSsingle->GetMaximum() < hRMSpileup->GetMaximum())
+    hRMSsingle->SetMaximum(hRMSpileup->GetMaximum());
+  hRMSsingle->Draw();
+  hRMSpileup->Draw("same");
+  rmsCv.BuildLegend(0.5,0.6,0.9,0.85,legendText.data());
+  tex.DrawLatexNDC(0.95,0.95,headerText.data());
+  rmsCv.SaveAs(Form("rms_%.0f_%i.pdf",itsRate*1.e-3,fitRejection));
+  rmsCv.Write();
   hNvert->Write();
   hNvertBC->Write();
   hMult->Write();
@@ -213,6 +263,8 @@ void PileUpToy(const double itsRate, const int fitRejection) {
   hDeltaZ->Write();
   hSigmaZ->Write();
   hSigmaZall->Write();
+  hRMSsingle->Write();
+  hRMSpileup->Write();
   output.Close();
 
 }
